@@ -1,27 +1,23 @@
-import requests
-import os
+import json
+
 from openai import OpenAI
 from dotenv import load_dotenv
 from flask import Flask, render_template, jsonify, request
 from src.sec_edgar import request_recent_filings, download_sec_html
 from langchain.chains import MapReduceDocumentsChain, ReduceDocumentsChain
-from langchain_text_splitters import CharacterTextSplitter
-from langchain.chains.summarize import load_summarize_chain
-from langchain_community.document_loaders import WebBaseLoader
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain.chains.llm import LLMChain
 from langchain.chains.combine_documents.stuff import StuffDocumentsChain
-from langchain_community.document_transformers import Html2TextTransformer
-from langchain_community.document_loaders import AsyncHtmlLoader
 from langchain_text_splitters import TokenTextSplitter
 from bs4 import BeautifulSoup
 from langchain.schema.document import Document
+import os
 
 
 app = Flask(__name__)
-load_dotenv('.env')
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+load_dotenv(".env")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
@@ -32,8 +28,14 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 recent_filings_data = {
     "AAPL": ["10-K", "10-Q", "8-K"],
     "GOOGL": ["10-K", "10-Q"],
-    "AMZN": ["10-K", "10-Q", "S-1"]
+    "AMZN": ["10-K", "10-Q", "S-1"],
 }
+
+# load sec company data
+json_file_path = os.path.join('data', 'sec_company_ticker.json')
+with open(json_file_path, 'r') as file:
+    sec_company_ticker = json.load(file)
+
 
 # Mock function to get HTML link for a filing
 def get_filing_html_link(company, filing_type):
@@ -47,30 +49,34 @@ def get_text_chunks_langchain(text):
     # texts = text_splitter.split_text(text)
     return docs
 
+
 def get_response_from_GPT(message):
     completion = client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
             {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": message}
-        ]
+            {"role": "user", "content": message},
+        ],
     )
     return completion.choices[0].message.content
 
-def get_summary_from_url(url):
+
+
+
+def get_response_from_url(url, prompt):
     html = download_sec_html(url)
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text()
     docs = get_text_chunks_langchain(text)
-   
+
     # message = "Summarize this and avoid the boiler plate info: " + text
     # response = get_response_from_GPT(message)
-    
-    # # print(response)
-    
-    llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo")
 
-    #Map
+    # # print(response)
+
+    llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo", api_key=OPENAI_API_KEY)
+
+    # Map
     map_template = """The following is a set of documents
     {docs}
     Based on this list of docs, please summarize these docs and avoid the boiler plate info.
@@ -79,35 +85,35 @@ def get_summary_from_url(url):
     map_prompt = PromptTemplate.from_template(map_template)
     map_chain = LLMChain(llm=llm, prompt=map_prompt)
 
-    #Reduce
+    # Reduce
     reduce_template = """The following is a set of summaries:
     {docs}
     Take these and distill it into a final, consolidated summary of the main themes.
     Helpful Answer:
     """
-    reduce_prompt = PromptTemplate.from_template(reduce_template)
+    reduce_prompt = PromptTemplate.from_template(prompt)
 
-    #Run chain
+    # Run chain
     reduce_chain = LLMChain(llm=llm, prompt=reduce_prompt)
 
-    #Takes a list of documents, combines them into a single string, and passes this to an LLMChain
+    # Takes a list of documents, combines them into a single string, and passes this to an LLMChain
     combine_documents_chain = StuffDocumentsChain(
         llm_chain=reduce_chain, document_variable_name="docs"
     )
 
-    #Combines and iteratively reduces the mapped documents
+    # Combines and iteratively reduces the mapped documents
     reduce_documents_chain = ReduceDocumentsChain(
         combine_documents_chain=combine_documents_chain,
         collapse_documents_chain=combine_documents_chain,
         token_max=4000,
     )
 
-    #Combining documents by mapping a chain over them, then combining results
+    # Combining documents by mapping a chain over them, then combining results
     map_reduce_chain = MapReduceDocumentsChain(
         llm_chain=map_chain,
         reduce_documents_chain=reduce_documents_chain,
         document_variable_name="docs",
-        return_intermediate_steps=False
+        return_intermediate_steps=False,
     )
 
     # text_splitter = CharacterTextSplitter.from_tiktoken_encoder(
@@ -115,24 +121,56 @@ def get_summary_from_url(url):
     # )
     # split_docs = text_splitter.split_documents(docs)
     result = map_reduce_chain.invoke(docs)
-    summary = result['output_text']
+    summary = result["output_text"]
     return summary
-    
-@app.route('/')
-def index():
-    return render_template('index.html')
 
-@app.route('/public/<path:path>')
+def get_summary_from_url(url):
+    prompt = """The following is a set of summaries:
+    {docs}
+    Take these and distill it into a final, consolidated summary of the main themes.
+    Helpful Answer:
+    """
+    response = get_response_from_url(url, prompt)
+    return response
+
+def get_key_points_from_url(url):
+    response = get_response_from_url(url, "List out key points of {docs}.")
+    return response
+
+def get_red_flags_from_url(url):
+    response = get_response_from_url(url, "Find red flags in this: {docs}")
+    return response
+
+def get_who_is_involved_from_url(url):
+    response = get_response_from_url(url, "Who is involved: {docs}")
+    return response
+
+def get_who_is_impacted_from_url(url):
+    response = get_response_from_url(url, "Who is impacted: {docs}")
+    return response
+
+def get_what_does_it_mean_for_investors_from_url(url):
+    response = get_response_from_url(url, "What does it mean for investors: {docs}")
+    return response
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/public/<path:path>")
 def serve_static(path):
     return app.send_static_file(path)
 
-@app.route('/recent_filings')
+
+@app.route("/recent_filings")
 def get_recent_filings():
-    company = request.args.get('company')
-    filing_type = request.args.get('filing_type')
+    company = request.args.get("company")
+    filing_type = request.args.get("filing_type")
 
     if company:
-        company = company.upper() # ensure that tickers are upper-case
+        company = company.upper()  # ensure that tickers are upper-case
     else:
         return jsonify({"error": "Missing query param: comany"}), 400
 
@@ -146,9 +184,10 @@ def get_recent_filings():
 
     return jsonify({"company": company, "filings": recent_filings})
 
-@app.route('/get_filing_html')
+
+@app.route("/get_filing_html")
 def get_filing_html():
-    url = request.args.get('url')
+    url = request.args.get("url")
 
     # Make sure that the URL actually goes to sec.gov
     if not url.startswith("https://www.sec.gov/"):
@@ -158,24 +197,127 @@ def get_filing_html():
         html = download_sec_html(url)
         return html
     except:
-        print(f'There was an error downloading the SEC HTML for {url}')
+        print(f"There was an error downloading the SEC HTML for {url}")
         return jsonify({"error": "Invalid SEC URL"}), 404
-    
-@app.route('/get_summary')
+
+
+@app.route("/get_summary")
 def get_summary():
-    url = request.args.get('url')
-    
+    url = request.args.get("url")
+
     # Make sure that the URL actually goes to sec.gov
     if not url.startswith("https://www.sec.gov/"):
         return jsonify({"error": "Invalid SEC URL"}), 400
-    
+
     try:
         summary = get_summary_from_url(url)
-        
+
         return jsonify(summary), 200
     except Exception as e:
         print(e)
         return jsonify({"error": "error downloading"}), 404
 
-if __name__ == '__main__':
-    app.run(debug=True, port=5000, host='0.0.0.0')
+
+@app.route("/get_key_points")
+def get_key_points():
+    url = request.args.get("url")
+
+    # Make sure that the URL actually goes to sec.gov
+    if not url.startswith("https://www.sec.gov/"):
+        return jsonify({"error": "Invalid SEC URL"}), 400
+
+    try:
+        summary = get_key_points_from_url(url)
+
+        return jsonify(summary), 200
+    except Exception as e:
+        print(e)
+        return jsonify({"error": "error downloading"}), 404
+
+
+@app.route("/get_red_flags")
+def get_red_flags():
+    url = request.args.get("url")
+
+    # Make sure that the URL actually goes to sec.gov
+    if not url.startswith("https://www.sec.gov/"):
+        return jsonify({"error": "Invalid SEC URL"}), 400
+
+    try:
+        summary = get_red_flags_from_url(url)
+
+        return jsonify(summary), 200
+    except Exception as e:
+        print(e)
+        return jsonify({"error": "error downloading"}), 404
+
+
+@app.route("/get_who_is_involved")
+def get_who_is_involved():
+    url = request.args.get("url")
+
+    # Make sure that the URL actually goes to sec.gov
+    if not url.startswith("https://www.sec.gov/"):
+        return jsonify({"error": "Invalid SEC URL"}), 400
+
+    try:
+        summary = get_who_is_involved_from_url(url)
+
+        return jsonify(summary), 200
+    except Exception as e:
+        print(e)
+        return jsonify({"error": "error downloading"}), 404
+
+
+@app.route("/get_who_is_impacted")
+def get_who_is_impacted():
+    url = request.args.get("url")
+
+    # Make sure that the URL actually goes to sec.gov
+    if not url.startswith("https://www.sec.gov/"):
+        return jsonify({"error": "Invalid SEC URL"}), 400
+
+    try:
+        summary = get_who_is_impacted_from_url(url)
+
+        return jsonify(summary), 200
+    except Exception as e:
+        print(e)
+        return jsonify({"error": "error downloading"}), 404
+
+
+@app.route("/get_what_does_it_mean")
+def get_what_does_it_mean():
+    url = request.args.get("url")
+    try:
+        summary = get_what_does_it_mean_for_investors_from_url(url)
+
+        return jsonify(summary), 200
+    except Exception as e:
+        print(e)
+        return jsonify({"error": "error downloading"}), 404
+
+
+@app.route("/get_auto_complete")
+def get_auto_complete():
+    try:
+        query = request.args.get('query', '')
+        suggestions = []
+        if query:
+            for value in sec_company_ticker.values():
+                if query.lower() in value['title'].lower():
+                    suggestions.append(value)
+                    if len(suggestions) == int(os.environ.get('MAX_SUGGESTION_LIMIT')):
+                        break
+        return jsonify(suggestions), 200
+    except Exception as e:
+        print(e)
+        return jsonify({"error": "error getting suggestions"}), 400
+
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000, host="0.0.0.0")
+
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5001, host="0.0.0.0")
